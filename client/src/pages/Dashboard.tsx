@@ -5,7 +5,7 @@
  * - Design moderne type Notion/HubSpot
  */
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { useLocation } from "wouter";
 import { Card } from "@/components/ui/card";
@@ -20,6 +20,7 @@ import {
 import { Plus, FolderOpen, Settings, LogOut, ChevronRight, Upload, ArrowRight, ArrowLeft, CheckCircle2, MoreVertical, Trash2, Bot, Volume2, VolumeX, Settings as SettingsIcon, Mic, MicOff, MessageSquare } from "lucide-react";
 import ProjectDetail from "./ProjectDetail";
 import { supabase } from "../lib/supabase";
+import { processCSV } from "../lib/csvService";
 
 // Types pour la reconnaissance vocale
 interface SpeechRecognition extends EventTarget {
@@ -84,27 +85,106 @@ export default function Dashboard() {
   const [selectedProject, setSelectedProject] = useState<string | null>(null);
   const [showCreateFlow, setShowCreateFlow] = useState(false);
 
-  // Données des projets
-  const [projects, setProjects] = useState<Project[]>([
-    {
-      id: "1",
-      name: "Recrutement Développeurs React",
-      jobTitle: "Senior React Developer",
-      candidateCount: 45,
-      status: "active",
-      createdAt: "2025-01-15",
-      progress: 65,
-    },
-    {
-      id: "2",
-      name: "Campagne Product Manager",
-      jobTitle: "Product Manager B2B SaaS",
-      candidateCount: 32,
-      status: "active",
-      createdAt: "2025-01-10",
-      progress: 42,
-    },
-  ]);
+  // Données des projets - récupérées depuis Supabase
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(true);
+
+  // Fonction pour mapper les données Supabase vers l'interface Project
+  const mapSupabaseProjectToProject = (supabaseProject: any): Project => {
+    return {
+      id: supabaseProject.id?.toString() || '',
+      name: supabaseProject.nom_projet || 'Projet sans nom',
+      jobTitle: supabaseProject.nom_poste || '',
+      candidateCount: 0, // Sera mis à jour après comptage
+      status: supabaseProject.status === 'active' ? 'active' : 'completed',
+      createdAt: supabaseProject.created_at 
+        ? new Date(supabaseProject.created_at).toISOString().split('T')[0]
+        : new Date().toISOString().split('T')[0],
+      progress: 0, // Sera calculé si nécessaire
+    };
+  };
+
+  // Fonction pour récupérer les projets depuis Supabase
+  const fetchProjects = useCallback(async () => {
+    try {
+      setIsLoadingProjects(true);
+      console.log('[DASHBOARD] Récupération des projets depuis Supabase...');
+      
+      const { data, error } = await supabase
+        .from('Projets')
+        .select('*')
+        .order('created_at', { ascending: false }); // Plus récent en premier
+
+      if (error) {
+        console.error('[DASHBOARD] Erreur lors de la récupération des projets:', error);
+        setProjects([]);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        console.log(`[DASHBOARD] ${data.length} projets récupérés depuis Supabase`);
+        
+        // Mapper les projets et compter les candidats pour chacun
+        const projectsWithCounts = await Promise.all(
+          data.map(async (supabaseProject) => {
+            const mappedProject = mapSupabaseProjectToProject(supabaseProject);
+            
+            // Compter les candidats pour ce projet
+            const projectIdNumber = typeof mappedProject.id === 'string' 
+              ? Number(mappedProject.id) 
+              : mappedProject.id;
+            
+            const { count, error: countError } = await supabase
+              .from('Candidats')
+              .select('*', { count: 'exact', head: true })
+              .eq('project_id', projectIdNumber);
+
+            if (!countError && count !== null) {
+              mappedProject.candidateCount = count;
+            }
+
+            return mappedProject;
+          })
+        );
+
+        // Ajouter le projet exemple en premier
+        const exampleProject: Project = {
+          id: 'example',
+          name: 'Exemple de projet',
+          jobTitle: 'Développeur Full Stack',
+          candidateCount: 8,
+          status: 'active',
+          createdAt: new Date().toISOString().split('T')[0],
+          progress: 45,
+        };
+        
+        setProjects([exampleProject, ...projectsWithCounts]);
+      } else {
+        console.log('[DASHBOARD] Aucun projet trouvé dans Supabase');
+        // Ajouter quand même le projet exemple
+        const exampleProject: Project = {
+          id: 'example',
+          name: 'Exemple de projet',
+          jobTitle: 'Développeur Full Stack',
+          candidateCount: 8,
+          status: 'active',
+          createdAt: new Date().toISOString().split('T')[0],
+          progress: 45,
+        };
+        setProjects([exampleProject]);
+      }
+    } catch (error) {
+      console.error('[DASHBOARD] Erreur inattendue lors de la récupération:', error);
+      setProjects([]);
+    } finally {
+      setIsLoadingProjects(false);
+    }
+  }, []);
+
+  // Récupérer les projets depuis Supabase au chargement
+  useEffect(() => {
+    fetchProjects();
+  }, [fetchProjects]);
   // Fonction de déconnexion
   const handleLogout = async () => {
     try {
@@ -116,12 +196,43 @@ export default function Dashboard() {
     }
   };
 
-  // Fonction pour supprimer un projet
-  const handleDeleteProject = (projectId: string, projectName: string) => {
+  // Fonction pour supprimer un projet depuis Supabase
+  const handleDeleteProject = async (projectId: string, projectName: string) => {
+    // Empêcher la suppression du projet exemple
+    if (projectId === 'example') {
+      alert('Ce projet est un exemple et ne peut pas être supprimé.');
+      return;
+    }
+
     if (window.confirm(`Êtes-vous sûr de vouloir supprimer le projet "${projectName}" ? Cette action est irréversible.`)) {
-      setProjects(prev => prev.filter(p => p.id !== projectId));
-      if (selectedProject === projectId) {
-        setSelectedProject(null);
+      try {
+        const projectIdNumber = typeof projectId === 'string' ? Number(projectId) : projectId;
+        
+        console.log('[DASHBOARD] Suppression du projet:', projectIdNumber);
+        
+        const { error } = await supabase
+          .from('Projets')
+          .delete()
+          .eq('id', projectIdNumber);
+
+        if (error) {
+          console.error('[DASHBOARD] Erreur lors de la suppression:', error);
+          alert(`Erreur lors de la suppression du projet: ${error.message}`);
+          return;
+        }
+
+        console.log('[DASHBOARD] Projet supprimé avec succès');
+        
+        // Si le projet supprimé était sélectionné, désélectionner
+        if (selectedProject === projectId) {
+          setSelectedProject(null);
+        }
+        
+        // Rafraîchir la liste depuis Supabase
+        await fetchProjects();
+      } catch (error: any) {
+        console.error('[DASHBOARD] Erreur inattendue lors de la suppression:', error);
+        alert(`Erreur lors de la suppression: ${error.message || 'Erreur inconnue'}`);
       }
     }
   };
@@ -131,9 +242,11 @@ export default function Dashboard() {
     return (
       <CreateProjectFlow
         onBack={() => setShowCreateFlow(false)}
-        onComplete={(newProject) => {
+        onComplete={async (newProject) => {
           setShowCreateFlow(false);
-          setProjects(prev => [...prev, newProject]);
+          // Rafraîchir la liste depuis Supabase pour avoir les données à jour
+          await fetchProjects();
+          // Sélectionner le nouveau projet après le rafraîchissement
           setSelectedProject(newProject.id);
         }}
       />
@@ -232,47 +345,59 @@ export default function Dashboard() {
             </p>
           </div>
 
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-            {projects.map((project) => (
-              <Card
-                key={project.id}
-                className="p-6 hover:shadow-lg transition-shadow relative"
-              >
-                <div className="flex items-start justify-between mb-4">
-                  <div 
-                    className="flex-1 cursor-pointer"
-                    onClick={() => setSelectedProject(project.id)}
-                  >
-                    <h3 className="font-semibold text-lg">{project.name}</h3>
-                    <p className="text-sm text-muted-foreground">
-                      {project.jobTitle}
-                    </p>
-                  </div>
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs font-medium px-2 py-1 bg-primary/10 text-primary rounded">
-                      {project.status === "active" ? "Actif" : "Terminé"}
-                    </span>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild onClick={(e) => e.stopPropagation()}>
-                        <Button variant="ghost" size="sm" className="h-8 w-8 p-0">
-                          <MoreVertical className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem
+          {isLoadingProjects ? (
+            <div className="text-center py-12">
+              <p className="text-muted-foreground">Chargement des projets...</p>
+            </div>
+          ) : projects.length === 0 ? (
+            <div className="text-center py-12">
+              <p className="text-muted-foreground mb-4">Aucun projet pour le moment</p>
+              <Button onClick={() => setShowCreateFlow(true)}>
+                <Plus className="h-4 w-4 mr-2" />
+                Créer votre premier projet
+              </Button>
+            </div>
+          ) : (
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              {projects.map((project) => (
+                <Card
+                  key={project.id}
+                  className="p-6 hover:shadow-lg transition-shadow relative"
+                >
+                  <div className="flex items-start justify-between mb-4">
+                    <div 
+                      className="flex-1 cursor-pointer"
+                      onClick={() => setSelectedProject(project.id)}
+                    >
+                      <h3 className="font-semibold text-lg">{project.name}</h3>
+                      <p className="text-sm text-muted-foreground">
+                        {project.jobTitle}
+                      </p>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs font-medium px-2 py-1 bg-primary/10 text-primary rounded">
+                        {project.status === "active" ? "Actif" : "Terminé"}
+                      </span>
+                      {project.id === 'example' ? (
+                        <span className="text-xs text-muted-foreground px-2 py-1">
+                          Exemple
+                        </span>
+                      ) : (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="h-8 w-8 p-0 text-destructive hover:text-destructive hover:bg-destructive/10"
                           onClick={(e) => {
                             e.stopPropagation();
                             handleDeleteProject(project.id, project.name);
                           }}
-                          className="text-destructive focus:text-destructive"
+                          title="Supprimer le projet"
                         >
-                          <Trash2 className="h-4 w-4 mr-2" />
-                          Supprimer le projet
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                          <Trash2 className="h-4 w-4" />
+                        </Button>
+                      )}
+                    </div>
                   </div>
-                </div>
 
                 <div 
                   className="space-y-4 cursor-pointer"
@@ -294,7 +419,8 @@ export default function Dashboard() {
                 </div>
               </Card>
             ))}
-          </div>
+            </div>
+          )}
         </div>
       </main>
     </div>
@@ -317,10 +443,14 @@ function CreateProjectFlow({
     nom: string;
     prenom: string;
     linkedin: string;
+    email?: string;
+    telephone?: string;
   }>({
     nom: '',
     prenom: '',
-    linkedin: ''
+    linkedin: '',
+    email: '',
+    telephone: ''
   });
   const [brief, setBrief] = useState({
     nomProjet: '',
@@ -358,12 +488,16 @@ function CreateProjectFlow({
         const autoMapping: any = {};
         headers.forEach(header => {
           const lowerHeader = header.toLowerCase();
-          if (lowerHeader.includes('nom') && !lowerHeader.includes('prenom')) {
+          if (lowerHeader.includes('nom') && !lowerHeader.includes('prenom') && !lowerHeader.includes('prénom')) {
             autoMapping.nom = header;
           } else if (lowerHeader.includes('prenom') || lowerHeader.includes('prénom')) {
             autoMapping.prenom = header;
           } else if (lowerHeader.includes('linkedin') || lowerHeader.includes('linked')) {
             autoMapping.linkedin = header;
+          } else if (lowerHeader.includes('email') || lowerHeader.includes('e-mail') || lowerHeader.includes('mail')) {
+            autoMapping.email = header;
+          } else if (lowerHeader.includes('telephone') || lowerHeader.includes('téléphone') || lowerHeader.includes('phone') || lowerHeader.includes('tel')) {
+            autoMapping.telephone = header;
           }
         });
         setMapping(autoMapping);
@@ -388,27 +522,126 @@ function CreateProjectFlow({
       alert('Veuillez remplir tous les champs obligatoires du brief');
       return;
     }
-    
-    // Créer le projet
-    const newProject: Project = {
-      id: Date.now().toString(),
-      name: brief.nomProjet,
-      jobTitle: brief.poste,
-      candidateCount: csvData.length,
-      status: 'active',
-      createdAt: new Date().toISOString().split('T')[0],
-      progress: 0,
-    };
-    
-    // Ici, vous pourriez sauvegarder dans Supabase
-    // await supabase.from('projects').insert({ 
-    //   ...newProject, 
-    //   brief, 
-    //   mapping, 
-    //   csvData 
-    // });
-    
-    onComplete(newProject);
+
+    if (!file) {
+      alert('Veuillez sélectionner un fichier CSV');
+      return;
+    }
+
+    if (!mapping.nom || !mapping.prenom || !mapping.linkedin) {
+      alert('Veuillez mapper les trois colonnes : Nom, Prénom et LinkedIn');
+      return;
+    }
+
+    try {
+      // 1. Créer le projet dans Supabase
+      console.log('[DASHBOARD] Création du projet dans Supabase...');
+      console.log('[DASHBOARD] Données du brief:', {
+        nom: brief.nomProjet,
+        poste: brief.poste,
+        description: brief.description,
+        competences: brief.competences,
+        experience: brief.experience,
+      });
+      
+      // En local : pas de vérification de connexion, on envoie directement
+      // Récupérer le user_id si disponible (optionnel en local)
+      let userId: string | undefined = undefined;
+      try {
+        const { data: { user } } = await supabase.auth.getUser();
+        userId = user?.id;
+      } catch (error) {
+        console.log('[DASHBOARD] Pas de session utilisateur, continuation en mode local');
+      }
+
+      // Préparer les données à insérer avec les noms de colonnes exacts de Supabase
+      // Colonnes attendues: nom_projet, description, competences, experience, status
+      const projectDataToInsert: any = {
+        nom_projet: brief.nomProjet, // Nom du projet
+        description: brief.description,
+        status: 'active', // Statut par défaut pour un nouveau projet
+      };
+
+      // Ajouter user_id si disponible
+      if (userId) {
+        projectDataToInsert.user_id = userId;
+      }
+      
+      // Ajouter competences si elle existe
+      if (brief.competences && brief.competences.trim() !== '') {
+        projectDataToInsert.competences = brief.competences;
+      }
+      
+      // Ajouter experience si elle existe
+      if (brief.experience && brief.experience.trim() !== '') {
+        projectDataToInsert.experience = brief.experience;
+      }
+      
+      // Log détaillé avec JSON.stringify pour voir exactement ce qui est envoyé
+      console.log('[DASHBOARD] ===== DONNÉES À INSÉRER DANS SUPABASE =====');
+      console.log('[DASHBOARD] JSON.stringify:', JSON.stringify(projectDataToInsert, null, 2));
+      console.log('[DASHBOARD] Objet brut:', projectDataToInsert);
+      console.log('[DASHBOARD] ============================================');
+      
+      const { data: projectData, error: projectError } = await supabase
+        .from('Projets')
+        .insert(projectDataToInsert)
+        .select()
+        .single();
+
+      if (projectError) {
+        console.error('[DASHBOARD] Erreur lors de la création du projet:', projectError);
+        alert(`Erreur lors de la création du projet: ${projectError.message}`);
+        return;
+      }
+
+      if (!projectData || !projectData.id) {
+        alert('Erreur: Le projet a été créé mais aucun ID n\'a été retourné');
+        return;
+      }
+
+      const projectId = projectData.id;
+      console.log('[DASHBOARD] Projet créé avec succès. ID:', projectId);
+
+      // 2. Importer les candidats via processCSV
+      console.log('[DASHBOARD] Importation des candidats...');
+      try {
+        // Appeler processCSV sans userId (colonne user_id n'existe pas dans la table)
+        const result = await processCSV(file, projectId, mapping);
+        
+        console.log('[DASHBOARD] Importation terminée:', result);
+        
+        // Créer l'objet Project pour l'interface
+        const newProject: Project = {
+          id: projectId,
+          name: brief.nomProjet,
+          jobTitle: brief.poste,
+          candidateCount: (result as any).summary?.success || csvData.length,
+          status: 'active',
+          createdAt: new Date().toISOString().split('T')[0],
+          progress: 0,
+        };
+
+        // Afficher un message de succès et rediriger vers la liste des projets
+        const successCount = (result as any).summary?.success || 0;
+        console.log(`[DASHBOARD] ✅ Projet créé avec succès ! ${successCount} candidats importés.`);
+        
+        // Appeler onComplete qui ferme le flux et affiche la liste des projets
+        onComplete(newProject);
+        
+        // Message de confirmation (optionnel, peut être remplacé par un toast)
+        alert(`✅ Projet "${brief.nomProjet}" créé avec succès !\n\n${successCount} candidat(s) importé(s).`);
+      } catch (csvError: any) {
+        console.error('[DASHBOARD] Erreur lors de l\'importation CSV:', csvError);
+        
+        // Supprimer le projet créé si l'import échoue
+        await supabase.from('Projets').delete().eq('id', projectId);
+        alert(`Erreur lors de l'importation des candidats:\n${csvError.message}`);
+      }
+    } catch (error: any) {
+      console.error('[DASHBOARD] Erreur inattendue:', error);
+      alert(`Erreur inattendue: ${error.message || 'Erreur inconnue'}`);
+    }
   };
 
   return (
@@ -492,7 +725,7 @@ function CreateProjectFlow({
             <Card className="p-8">
               <h2 className="text-2xl font-semibold mb-2">Mappez vos colonnes</h2>
               <p className="text-muted-foreground mb-6">
-                Sélectionnez les colonnes correspondant à : Nom, Prénom et LinkedIn
+                Sélectionnez les colonnes correspondant à : Nom, Prénom, LinkedIn (obligatoires) et Email, Téléphone (optionnels)
               </p>
               
               <div className="space-y-4 mb-6">
@@ -532,6 +765,34 @@ function CreateProjectFlow({
                     className="w-full h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm"
                   >
                     <option value="">Sélectionnez une colonne</option>
+                    {csvHeaders.map(header => (
+                      <option key={header} value={header}>{header}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Email (optionnel)</label>
+                  <select
+                    value={mapping.email || ''}
+                    onChange={(e) => setMapping({ ...mapping, email: e.target.value || undefined })}
+                    className="w-full h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                  >
+                    <option value="">Aucune colonne (optionnel)</option>
+                    {csvHeaders.map(header => (
+                      <option key={header} value={header}>{header}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Téléphone (optionnel)</label>
+                  <select
+                    value={mapping.telephone || ''}
+                    onChange={(e) => setMapping({ ...mapping, telephone: e.target.value || undefined })}
+                    className="w-full h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                  >
+                    <option value="">Aucune colonne (optionnel)</option>
                     {csvHeaders.map(header => (
                       <option key={header} value={header}>{header}</option>
                     ))}

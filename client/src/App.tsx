@@ -31,7 +31,7 @@ function Router() {
       {/* En développement : accès au Dashboard autorisé */}
       {/* En production : redirection vers la page d'accueil */}
       {isDev ? (
-        <Route path={"/dashboard"} component={Dashboard} />
+      <Route path={"/dashboard"} component={Dashboard} />
       ) : (
         <Route path={"/dashboard"} component={DashboardRedirect} />
       )}

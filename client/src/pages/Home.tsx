@@ -8,23 +8,55 @@
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent } from "@/components/ui/card";
-import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import { ArrowRight, Upload, Phone, Calendar, CheckCircle2, TrendingUp, Users, Clock, DollarSign, Mail, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
+import { registerUserOnLogin } from "@/lib/authService";
 import { useLocation } from "wouter";
+import { toast } from "sonner";
+import { triggerConfetti } from "@/lib/celebration";
 
 export default function Home() {
   const [isVisible, setIsVisible] = useState(false);
   const [showUpload, setShowUpload] = useState(false);
   const [email, setEmail] = useState("");
   const [isSubmitted, setIsSubmitted] = useState(false);
-  const [showWaitlistModal, setShowWaitlistModal] = useState(false);
-  const [waitlistEmail, setWaitlistEmail] = useState("");
-  const [waitlistSubmitted, setWaitlistSubmitted] = useState(false);
+  const [, setLocation] = useLocation();
 
   useEffect(() => {
     setIsVisible(true);
+  }, []);
+
+  // Vérifier la session au chargement de la page (pour gérer le retour du callback OAuth)
+  useEffect(() => {
+    const checkSession = async () => {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        console.log("[HOME] Session trouvée au chargement, enregistrement de l'utilisateur...");
+        const result = await registerUserOnLogin(session);
+        if (result.success) {
+          console.log("[HOME] Utilisateur enregistré avec succès dans la table Connexion");
+          // Déclencher les confettis
+          triggerConfetti();
+          // Afficher le toast avec emoji et style personnalisé
+          toast.success("🎉 Bravo, vous êtes bien inscrit sur la liste ! 🎉", {
+            duration: 5000,
+            style: {
+              fontSize: '18px',
+              padding: '20px',
+              fontWeight: '600',
+            },
+          });
+          // Déconnecter l'utilisateur pour qu'il reste sur la landing page
+          await supabase.auth.signOut();
+          console.log("[HOME] Utilisateur déconnecté après inscription");
+        } else {
+          console.error("[HOME] Échec de l'enregistrement:", result.error);
+          toast.error(`Erreur lors de l'inscription à la waiting list: ${result.error}`);
+        }
+      }
+    };
+    checkSession();
   }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -53,35 +85,61 @@ export default function Home() {
     }
   };
 
-  const handleWaitlistSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
+  // Fonction pour lancer la connexion Google
+  const handleGoogleLogin = async () => {
+    const { error } = await supabase.auth.signInWithOAuth({
+      provider: 'google',
+      options: {
+        redirectTo: window.location.origin + '/',
+      },
+    });
     
-    try {
-      const { error } = await supabase
-        .from("waitlist")
-        .insert([
-          {
-            email: waitlistEmail.trim().toLowerCase(),
-            created_at: new Date().toISOString(),
-          },
-        ]);
-
-      if (error) {
-        console.error("Erreur lors de l'inscription:", error);
-        alert("Une erreur est survenue. Veuillez réessayer.");
-      } else {
-        setWaitlistSubmitted(true);
-        setWaitlistEmail("");
-        setTimeout(() => {
-          setShowWaitlistModal(false);
-          setWaitlistSubmitted(false);
-        }, 2000);
-      }
-    } catch (error) {
-      console.error("Erreur lors de l'inscription:", error);
-      alert("Une erreur est survenue. Veuillez réessayer.");
+    if (error) {
+      console.error("Erreur d'authentification :", error.message);
+      toast.error("Erreur lors de la connexion avec Google.");
     }
   };
+
+  // Écouter les changements d'authentification pour enregistrer l'utilisateur
+  useEffect(() => {
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log("[HOME] Événement d'authentification:", event, session?.user?.email);
+      
+      if (event === 'SIGNED_IN' && session) {
+        console.log("[HOME] Connexion détectée, enregistrement de l'utilisateur...");
+        // Enregistrer automatiquement l'utilisateur dans la table 'Connexion'
+        const result = await registerUserOnLogin(session);
+        if (result.success) {
+          console.log("[HOME] Utilisateur enregistré avec succès dans la table Connexion");
+          // Déclencher les confettis
+          triggerConfetti();
+          // Afficher le toast avec emoji et style personnalisé
+          toast.success("🎉 Bravo, vous êtes bien inscrit sur la liste ! 🎉", {
+            duration: 5000,
+            style: {
+              fontSize: '18px',
+              padding: '20px',
+              fontWeight: '600',
+            },
+          });
+          // Déconnecter l'utilisateur pour qu'il reste sur la landing page
+          await supabase.auth.signOut();
+          console.log("[HOME] Utilisateur déconnecté après inscription");
+          // Rediriger vers la home page (si on n'y est pas déjà)
+          if (window.location.pathname !== '/') {
+            setLocation('/');
+          }
+        } else {
+          console.error("[HOME] Échec de l'enregistrement:", result.error);
+          toast.error(`Erreur lors de l'inscription à la waiting list: ${result.error}`);
+        }
+      }
+    });
+
+    return () => subscription.unsubscribe();
+  }, [setLocation]);
 
   if (showUpload) {
     return <UploadPage onBack={() => setShowUpload(false)} />;
@@ -106,7 +164,7 @@ export default function Home() {
               <a href="#integrations" className="text-sm hover:text-primary transition-colors duration-150">
                 Intégration
               </a>
-              <Button size="sm" className="transition-all duration-150 hover:scale-105" onClick={() => setShowWaitlistModal(true)}>
+              <Button size="sm" className="transition-all duration-150 hover:scale-105" onClick={handleGoogleLogin}>
                 Accès anticipé
               </Button>
             </div>
@@ -145,7 +203,7 @@ export default function Home() {
             </div>
             <div className={`relative ${isVisible ? 'animate-slide-in-right' : 'opacity-0'}`} style={{ animationDelay: '200ms' }}>
               <div className="flex items-center justify-center h-96 bg-card rounded-lg border border-border">
-                <Button size="lg" onClick={() => setShowWaitlistModal(true)} className="group transition-all duration-150 hover:scale-105">
+                <Button size="lg" onClick={handleGoogleLogin} className="group transition-all duration-150 hover:scale-105">
                   <Upload className="mr-2 h-5 w-5" />
                   Importez CSV de LinkedIn Recruiter
                 </Button>
@@ -346,42 +404,6 @@ export default function Home() {
         </div>
       </footer>
 
-      {/* Waitlist Modal */}
-      <Dialog open={showWaitlistModal} onOpenChange={setShowWaitlistModal}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="font-display text-2xl">Rejoindre la waitlist</DialogTitle>
-            <DialogDescription>
-              Inscrivez-vous pour être parmi les premiers à accéder à HunterAI
-            </DialogDescription>
-          </DialogHeader>
-          {waitlistSubmitted ? (
-            <div className="flex flex-col items-center justify-center py-8">
-              <CheckCircle2 className="h-12 w-12 text-primary mb-4" />
-              <p className="text-lg font-semibold mb-2">Merci !</p>
-              <p className="text-sm text-muted-foreground text-center">
-                Vous avez été ajouté à la waitlist. Nous vous contacterons bientôt.
-              </p>
-            </div>
-          ) : (
-            <form onSubmit={handleWaitlistSubmit} className="space-y-4">
-              <div>
-                <Input
-                  type="email"
-                  placeholder="votre@email.com"
-                  value={waitlistEmail}
-                  onChange={(e) => setWaitlistEmail(e.target.value)}
-                  required
-                  className="w-full"
-                />
-              </div>
-              <Button type="submit" className="w-full" size="lg">
-                S'inscrire
-              </Button>
-            </form>
-          )}
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }
@@ -492,23 +514,49 @@ function UploadPage({ onBack }: { onBack: () => void }) {
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
       options: {
-        redirectTo: window.location.origin + '/dashboard',
+        redirectTo: window.location.origin + '/',
       },
     });
     
     if (error) {
       console.error("Erreur d'authentification :", error.message);
-      alert("Erreur lors de la connexion avec Google.");
+      toast.error("Erreur lors de la connexion avec Google.");
     }
   };
 
-  // Écouter les changements d'authentification pour rediriger vers le dashboard
+  // Écouter les changements d'authentification pour enregistrer l'utilisateur
   useEffect(() => {
     const {
       data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      if (session) {
-        setLocation('/dashboard');
+    } = supabase.auth.onAuthStateChange(async (event, session) => {
+      console.log("[UPLOAD] Événement d'authentification:", event, session?.user?.email);
+      
+      if (event === 'SIGNED_IN' && session) {
+        console.log("[UPLOAD] Connexion détectée, enregistrement de l'utilisateur...");
+        // Enregistrer automatiquement l'utilisateur dans la table 'Connexion'
+        const result = await registerUserOnLogin(session);
+        if (result.success) {
+          console.log("[UPLOAD] Utilisateur enregistré avec succès dans la table Connexion");
+          // Déclencher les confettis
+          triggerConfetti();
+          // Afficher le toast avec emoji et style personnalisé
+          toast.success("🎉 Bravo, vous êtes bien inscrit sur la liste ! 🎉", {
+            duration: 5000,
+            style: {
+              fontSize: '18px',
+              padding: '20px',
+              fontWeight: '600',
+            },
+          });
+          // Déconnecter l'utilisateur pour qu'il reste sur la landing page
+          await supabase.auth.signOut();
+          console.log("[UPLOAD] Utilisateur déconnecté après inscription");
+          // Rediriger vers la home page
+          setLocation('/');
+        } else {
+          console.error("[UPLOAD] Échec de l'enregistrement:", result.error);
+          toast.error(`Erreur lors de l'inscription à la waiting list: ${result.error}`);
+        }
       }
     });
 

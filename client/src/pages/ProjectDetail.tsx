@@ -12,6 +12,10 @@ import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
+import { supabase } from "@/lib/supabase";
+import { processCSV } from "@/lib/csvService";
+// @ts-ignore - papaparse n'a pas de types officiels
+import Papa from 'papaparse';
 import {
   ArrowLeft,
   MessageSquare,
@@ -30,6 +34,7 @@ import {
   ChevronDown,
   ChevronUp,
   Upload,
+  Play,
 } from "lucide-react";
 
 interface Project {
@@ -222,194 +227,293 @@ PS : Je suis l'agent AI de Rafael Debucquet, ce première échange ne durera que
     }
   }, []);
   
-  // Initialiser les candidats
-  const initialCandidates: Candidate[] = [
+  // État pour les candidats récupérés depuis Supabase
+  const [candidatesList, setCandidatesList] = useState<Candidate[]>([]);
+  const [isLoadingCandidates, setIsLoadingCandidates] = useState(true);
+
+  // Fonction pour mapper les données Supabase vers l'interface Candidate
+  const mapSupabaseCandidateToCandidate = (supabaseCandidate: any): Candidate => {
+    // Mapper le statut Supabase vers le statut de l'interface
+    // 'En attente' -> 'imported', autres statuts à mapper selon votre logique
+    let mappedStatus: Candidate['status'] = 'imported';
+    if (supabaseCandidate.status === 'En attente') {
+      mappedStatus = 'imported';
+    } else if (supabaseCandidate.status === 'Contacté') {
+      mappedStatus = 'contacted';
+    } else if (supabaseCandidate.status === 'Réponse reçue') {
+      mappedStatus = 'responded';
+    } else if (supabaseCandidate.status === 'Préqualifié') {
+      mappedStatus = 'qualified';
+    } else if (supabaseCandidate.status === 'RDV planifié') {
+      mappedStatus = 'scheduled';
+    } else if (supabaseCandidate.status === 'Joint au téléphone') {
+      mappedStatus = 'joined';
+    }
+
+    return {
+      id: supabaseCandidate.id?.toString() || '',
+      name: supabaseCandidate.nom_complet || 'Nom non renseigné',
+      email: supabaseCandidate.email || '',
+      phone: supabaseCandidate.telephone || '',
+      company: '', // Non disponible dans Supabase pour le moment
+      status: mappedStatus,
+      score: 0,
+      notes: '',
+      dateAdded: supabaseCandidate.created_at ? new Date(supabaseCandidate.created_at).toISOString().split('T')[0] : undefined,
+      dateContacted: supabaseCandidate.date_contact ? new Date(supabaseCandidate.date_contact).toISOString().split('T')[0] : undefined,
+      sequenceStage: undefined,
+    };
+  };
+
+  // Candidats fictifs pour le projet exemple
+  const exampleCandidates: Candidate[] = [
     {
-      id: "1",
-      name: "Alice Dupont",
-      email: "alice.dupont@email.com",
-      phone: "+33612345678",
-      company: "TechCorp",
-      status: "joined",
-      score: 92,
-      notes: "Excellente expérience React, disponible immédiatement",
-      dateAdded: "2025-01-15",
-      dateContacted: "2025-01-15",
-      sequenceStage: "Appel téléphonique terminé",
-      callAnswers: [
-        { question: "Êtes-vous toujours en poste ?", answer: "Oui, je suis actuellement en poste mais je cherche une nouvelle opportunité." },
-        { question: "Habitez-vous bien dans la région ?", answer: "Oui, j'habite à Paris, c'est parfait pour moi." },
-        { question: "Quel est votre niveau de rémunération et vos prétentions salariales ?", answer: "Actuellement à 65k€, je cherche entre 70-75k€." },
-        { question: "Quel est votre niveau d'anglais ?", answer: "Bilingue, j'ai travaillé 3 ans à Londres." },
-        { question: "Combien de personnes managez-vous ?", answer: "J'encadre une équipe de 5 développeurs." }
-      ],
-      scoreDetails: [
-        { criteria: "Expérience technique", points: 25, maxPoints: 25 },
-        { criteria: "Niveau d'anglais", points: 20, maxPoints: 20 },
-        { criteria: "Expérience managériale", points: 18, maxPoints: 20 },
-        { criteria: "Disponibilité", points: 15, maxPoints: 15 },
-        { criteria: "Prétentions salariales", points: 14, maxPoints: 20 }
-      ]
+      id: 'example_1',
+      name: 'Sophie Martin',
+      email: 'sophie.martin@example.com',
+      phone: '+33 6 12 34 56 78',
+      company: 'TechCorp',
+      status: 'imported',
+      dateAdded: '2025-01-10',
+      sequenceStage: 'En attente',
     },
     {
-      id: "2",
-      name: "Bob Martin",
-      email: "bob.martin@email.com",
-      phone: "+33687654321",
-      company: "StartupXYZ",
-      status: "qualified",
+      id: 'example_2',
+      name: 'Thomas Dubois',
+      email: 'thomas.dubois@example.com',
+      phone: '+33 6 23 45 67 89',
+      company: 'StartupXYZ',
+      status: 'contacted',
+      dateAdded: '2025-01-11',
+      dateContacted: '2025-01-12',
+      sequenceStage: 'Email envoyé',
+    },
+    {
+      id: 'example_3',
+      name: 'Marie Leroy',
+      email: 'marie.leroy@example.com',
+      phone: '+33 6 34 56 78 90',
+      company: 'DigitalAgency',
+      status: 'responded',
+      dateAdded: '2025-01-09',
+      dateContacted: '2025-01-10',
+      response: 'Bonjour, je suis intéressée par cette opportunité. Je suis disponible pour un échange.',
+      responseType: 'email',
+      sequenceStage: 'Réponse reçue',
+    },
+    {
+      id: 'example_4',
+      name: 'Pierre Moreau',
+      email: 'pierre.moreau@example.com',
+      phone: '+33 6 45 67 89 01',
+      company: 'WebStudio',
+      status: 'joined',
+      dateAdded: '2025-01-08',
+      dateContacted: '2025-01-09',
+      sequenceStage: 'Appel effectué',
+      callAnswers: [
+        { question: 'Êtes-vous toujours en poste ?', answer: 'Oui, je suis actuellement développeur senior chez WebStudio' },
+        { question: 'Habitez-vous bien dans la région ?', answer: 'Oui, j\'habite à Paris' },
+        { question: 'Quel est votre niveau de rémunération et vos prétentions salariales ?', answer: 'Actuellement à 65k€, je cherche autour de 75-80k€' },
+        { question: 'Quel est votre niveau d\'anglais ?', answer: 'Courant, je travaille régulièrement avec des équipes internationales' },
+        { question: 'Combien de personnes managez-vous ?', answer: 'Je manage une équipe de 3 développeurs' },
+      ],
       score: 85,
-      notes: "Bon match, légèrement junior mais très motivé",
-      dateAdded: "2025-01-14",
-      dateContacted: "2025-01-14",
-      sequenceStage: "Appel téléphonique terminé",
-      callAnswers: [
-        { question: "Êtes-vous toujours en poste ?", answer: "Oui, je suis en poste mais ouvert à de nouvelles opportunités." },
-        { question: "Habitez-vous bien dans la région ?", answer: "Oui, j'habite en région parisienne." },
-        { question: "Quel est votre niveau de rémunération et vos prétentions salariales ?", answer: "Actuellement à 55k€, je cherche autour de 60-65k€." },
-        { question: "Quel est votre niveau d'anglais ?", answer: "Bon niveau, je peux communiquer professionnellement." },
-        { question: "Combien de personnes managez-vous ?", answer: "Je ne manage pas encore d'équipe, mais j'ai encadré des stagiaires." }
-      ],
       scoreDetails: [
-        { criteria: "Expérience technique", points: 22, maxPoints: 25 },
-        { criteria: "Niveau d'anglais", points: 16, maxPoints: 20 },
-        { criteria: "Expérience managériale", points: 8, maxPoints: 20 },
-        { criteria: "Disponibilité", points: 15, maxPoints: 15 },
-        { criteria: "Prétentions salariales", points: 18, maxPoints: 20 }
-      ]
+        { criteria: 'Compétences techniques', points: 18, maxPoints: 20 },
+        { criteria: 'Expérience', points: 17, maxPoints: 20 },
+        { criteria: 'Mobilité', points: 20, maxPoints: 20 },
+        { criteria: 'Rémunération', points: 15, maxPoints: 20 },
+        { criteria: 'Langues', points: 15, maxPoints: 20 },
+      ],
     },
     {
-      id: "3",
-      name: "Carol Leclerc",
-      email: "carol.leclerc@email.com",
-      phone: "+33698765432",
-      company: "WebAgency",
-      status: "contacted",
-      score: 0,
-      notes: "",
-      dateAdded: "2025-01-16",
-      dateContacted: "2025-01-16",
-      sequenceStage: "Email 1 envoyé",
+      id: 'example_5',
+      name: 'Julie Bernard',
+      email: 'julie.bernard@example.com',
+      phone: '+33 6 56 78 90 12',
+      company: 'InnovateLab',
+      status: 'qualified',
+      dateAdded: '2025-01-07',
+      dateContacted: '2025-01-08',
+      score: 92,
+      scoreDetails: [
+        { criteria: 'Compétences techniques', points: 19, maxPoints: 20 },
+        { criteria: 'Expérience', points: 18, maxPoints: 20 },
+        { criteria: 'Mobilité', points: 20, maxPoints: 20 },
+        { criteria: 'Rémunération', points: 18, maxPoints: 20 },
+        { criteria: 'Langues', points: 17, maxPoints: 20 },
+      ],
+      callAnswers: [
+        { question: 'Êtes-vous toujours en poste ?', answer: 'Oui, je suis actuellement lead developer' },
+        { question: 'Habitez-vous bien dans la région ?', answer: 'Oui, j\'habite à Lyon' },
+        { question: 'Quel est votre niveau de rémunération et vos prétentions salariales ?', answer: 'Actuellement à 70k€, je cherche autour de 80-85k€' },
+        { question: 'Quel est votre niveau d\'anglais ?', answer: 'Bilingue, j\'ai travaillé 2 ans à Londres' },
+        { question: 'Combien de personnes managez-vous ?', answer: 'Je manage une équipe de 5 développeurs' },
+      ],
+      notes: 'Excellente candidate, très motivée et avec une expérience solide.',
     },
     {
-      id: "4",
-      name: "David Bernard",
-      email: "david.bernard@email.com",
-      phone: "+33611111111",
-      company: "DataCorp",
-      status: "responded",
-      score: 0,
-      notes: "",
-      dateAdded: "2025-01-15",
-      dateContacted: "2025-01-15",
-      sequenceStage: "SMS 1 envoyé",
-      response: "Bonjour, oui je suis intéressé. Je suis disponible cette semaine.",
-      responseType: "sms",
-    },
-    {
-      id: "5",
-      name: "Emma Dubois",
-      email: "emma.dubois@email.com",
-      phone: "+33622222222",
-      company: "CloudTech",
-      status: "responded",
-      score: 0,
-      notes: "",
-      dateAdded: "2025-01-14",
-      dateContacted: "2025-01-14",
-      sequenceStage: "Email 1 envoyé",
-      response: "Merci pour votre message. Je serais ravie d'en discuter. Vous pouvez m'appeler au 06 22 22 22 22 entre 14h et 18h.",
-      responseType: "email",
-    },
-    {
-      id: "6",
-      name: "François Moreau",
-      email: "francois.moreau@email.com",
-      phone: "+33633333333",
-      company: "DevStudio",
-      status: "imported",
-      score: 0,
-      notes: "",
-      dateAdded: "2025-01-17",
-      dateContacted: undefined,
-      sequenceStage: "En attente",
-    },
-    {
-      id: "7",
-      name: "Gabrielle Petit",
-      email: "gabrielle.petit@email.com",
-      phone: "+33644444444",
-      company: "TechStart",
-      status: "contacted",
-      score: 0,
-      notes: "",
-      dateAdded: "2025-01-16",
-      dateContacted: "2025-01-16",
-      sequenceStage: "SMS 1 envoyé",
-    },
-    {
-      id: "8",
-      name: "Hugo Leroy",
-      email: "hugo.leroy@email.com",
-      phone: "+33655555555",
-      company: "InnovateLab",
-      status: "responded",
-      score: 0,
-      notes: "",
-      dateAdded: "2025-01-15",
-      dateContacted: "2025-01-15",
-      sequenceStage: "Email 1 envoyé",
-      response: "Désolé, je ne suis pas intéressé pour le moment.",
-      responseType: "email",
-    },
-    {
-      id: "9",
-      name: "Isabelle Roux",
-      email: "isabelle.roux@email.com",
-      phone: "+33666666666",
-      company: "CodeFactory",
-      status: "qualified",
+      id: 'example_6',
+      name: 'Lucas Petit',
+      email: 'lucas.petit@example.com',
+      phone: '+33 6 67 89 01 23',
+      company: 'CloudTech',
+      status: 'qualified',
+      dateAdded: '2025-01-06',
+      dateContacted: '2025-01-07',
       score: 78,
-      notes: "Bonne expérience, à confirmer disponibilité",
-      dateAdded: "2025-01-14",
-      dateContacted: "2025-01-14",
-      sequenceStage: "Appel téléphonique terminé",
-      callAnswers: [
-        { question: "Êtes-vous toujours en poste ?", answer: "Oui, je suis en poste." },
-        { question: "Habitez-vous bien dans la région ?", answer: "Oui, j'habite à Lyon." },
-        { question: "Quel est votre niveau de rémunération et vos prétentions salariales ?", answer: "Actuellement à 60k€, je cherche 65-70k€." },
-        { question: "Quel est votre niveau d'anglais ?", answer: "Niveau intermédiaire, je peux lire et écrire mais l'oral est plus difficile." },
-        { question: "Combien de personnes managez-vous ?", answer: "J'encadre 2 développeurs juniors." }
-      ],
       scoreDetails: [
-        { criteria: "Expérience technique", points: 20, maxPoints: 25 },
-        { criteria: "Niveau d'anglais", points: 12, maxPoints: 20 },
-        { criteria: "Expérience managériale", points: 12, maxPoints: 20 },
-        { criteria: "Disponibilité", points: 12, maxPoints: 15 },
-        { criteria: "Prétentions salariales", points: 16, maxPoints: 20 }
-      ]
+        { criteria: 'Compétences techniques', points: 16, maxPoints: 20 },
+        { criteria: 'Expérience', points: 15, maxPoints: 20 },
+        { criteria: 'Mobilité', points: 18, maxPoints: 20 },
+        { criteria: 'Rémunération', points: 14, maxPoints: 20 },
+        { criteria: 'Langues', points: 15, maxPoints: 20 },
+      ],
+      callAnswers: [
+        { question: 'Êtes-vous toujours en poste ?', answer: 'Oui, je suis développeur chez CloudTech' },
+        { question: 'Habitez-vous bien dans la région ?', answer: 'Oui, j\'habite à Marseille' },
+        { question: 'Quel est votre niveau de rémunération et vos prétentions salariales ?', answer: 'Actuellement à 55k€, je cherche autour de 65k€' },
+        { question: 'Quel est votre niveau d\'anglais ?', answer: 'Intermédiaire, je peux communiquer mais pas bilingue' },
+        { question: 'Combien de personnes managez-vous ?', answer: 'Je ne manage personne actuellement' },
+      ],
     },
     {
-      id: "10",
-      name: "Julien Blanc",
-      email: "julien.blanc@email.com",
-      phone: "+33677777777",
-      company: "AppWorks",
-      status: "scheduled",
+      id: 'example_7',
+      name: 'Camille Rousseau',
+      email: 'camille.rousseau@example.com',
+      phone: '+33 6 78 90 12 34',
+      company: 'DataSolutions',
+      status: 'scheduled',
+      dateAdded: '2025-01-05',
+      dateContacted: '2025-01-06',
       score: 88,
-      notes: "RDV planifié pour le 20/01",
-      dateAdded: "2025-01-13",
-      dateContacted: "2025-01-13",
-      sequenceStage: "Appel téléphonique terminé",
+      scoreDetails: [
+        { criteria: 'Compétences techniques', points: 18, maxPoints: 20 },
+        { criteria: 'Expérience', points: 17, maxPoints: 20 },
+        { criteria: 'Mobilité', points: 20, maxPoints: 20 },
+        { criteria: 'Rémunération', points: 16, maxPoints: 20 },
+        { criteria: 'Langues', points: 17, maxPoints: 20 },
+      ],
+      callAnswers: [
+        { question: 'Êtes-vous toujours en poste ?', answer: 'Oui, je suis senior developer' },
+        { question: 'Habitez-vous bien dans la région ?', answer: 'Oui, j\'habite à Toulouse' },
+        { question: 'Quel est votre niveau de rémunération et vos prétentions salariales ?', answer: 'Actuellement à 68k€, je cherche autour de 75-80k€' },
+        { question: 'Quel est votre niveau d\'anglais ?', answer: 'Courant, je travaille avec des clients internationaux' },
+        { question: 'Combien de personnes managez-vous ?', answer: 'Je manage une équipe de 2 développeurs' },
+      ],
+      notes: 'RDV planifié pour le 20 janvier à 14h',
+    },
+    {
+      id: 'example_8',
+      name: 'Antoine Blanc',
+      email: 'antoine.blanc@example.com',
+      phone: '+33 6 89 01 23 45',
+      company: 'DevAgency',
+      status: 'scheduled',
+      dateAdded: '2025-01-04',
+      dateContacted: '2025-01-05',
+      score: 90,
+      scoreDetails: [
+        { criteria: 'Compétences techniques', points: 19, maxPoints: 20 },
+        { criteria: 'Expérience', points: 18, maxPoints: 20 },
+        { criteria: 'Mobilité', points: 20, maxPoints: 20 },
+        { criteria: 'Rémunération', points: 17, maxPoints: 20 },
+        { criteria: 'Langues', points: 16, maxPoints: 20 },
+      ],
+      callAnswers: [
+        { question: 'Êtes-vous toujours en poste ?', answer: 'Oui, je suis tech lead' },
+        { question: 'Habitez-vous bien dans la région ?', answer: 'Oui, j\'habite à Bordeaux' },
+        { question: 'Quel est votre niveau de rémunération et vos prétentions salariales ?', answer: 'Actuellement à 72k€, je cherche autour de 82-85k€' },
+        { question: 'Quel est votre niveau d\'anglais ?', answer: 'Courant, j\'ai fait mes études aux États-Unis' },
+        { question: 'Combien de personnes managez-vous ?', answer: 'Je manage une équipe de 6 développeurs' },
+      ],
+      notes: 'RDV planifié pour le 22 janvier à 10h',
     },
   ];
 
-  const [candidatesList, setCandidatesList] = useState<Candidate[]>(initialCandidates);
+  // Récupérer les candidats depuis Supabase
+  useEffect(() => {
+    // Si c'est le projet exemple, utiliser les candidats fictifs
+    if (project.id === 'example') {
+      setIsLoadingCandidates(false);
+      setCandidatesList(exampleCandidates);
+      return;
+    }
 
-  // Fonction pour importer de nouveaux candidats
-  const handleImportCandidates = (newCandidates: Candidate[]) => {
-    setCandidatesList(prev => [...prev, ...newCandidates]);
+    const fetchCandidates = async () => {
+      try {
+        setIsLoadingCandidates(true);
+        const projectIdNumber = typeof project.id === 'string' ? Number(project.id) : project.id;
+        
+        console.log('[ProjectDetail] Récupération des candidats pour le projet:', projectIdNumber);
+        
+        const { data, error } = await supabase
+          .from('Candidats')
+          .select('*')
+          .eq('project_id', projectIdNumber)
+          .order('created_at', { ascending: false });
+
+        if (error) {
+          console.error('[ProjectDetail] Erreur lors de la récupération des candidats:', error);
+          setCandidatesList([]);
+          return;
+        }
+
+        if (data) {
+          console.log(`[ProjectDetail] ${data.length} candidats récupérés depuis Supabase`);
+          const mappedCandidates = data.map(mapSupabaseCandidateToCandidate);
+          setCandidatesList(mappedCandidates);
+        } else {
+          setCandidatesList([]);
+        }
+      } catch (error) {
+        console.error('[ProjectDetail] Erreur inattendue lors de la récupération:', error);
+        setCandidatesList([]);
+      } finally {
+        setIsLoadingCandidates(false);
+      }
+    };
+
+    fetchCandidates();
+  }, [project.id]);
+
+  // Fonction pour rafraîchir la liste des candidats depuis Supabase
+  const refreshCandidates = async () => {
+    try {
+      setIsLoadingCandidates(true);
+      const projectIdNumber = typeof project.id === 'string' ? Number(project.id) : project.id;
+      
+      console.log('[ProjectDetail] Rafraîchissement des candidats pour le projet:', projectIdNumber);
+      
+      const { data, error } = await supabase
+        .from('Candidats')
+        .select('*')
+        .eq('project_id', projectIdNumber)
+        .order('created_at', { ascending: false });
+
+      if (error) {
+        console.error('[ProjectDetail] Erreur lors du rafraîchissement:', error);
+        return;
+      }
+
+      if (data) {
+        console.log(`[ProjectDetail] ${data.length} candidats récupérés depuis Supabase`);
+        const mappedCandidates = data.map(mapSupabaseCandidateToCandidate);
+        setCandidatesList(mappedCandidates);
+      }
+    } catch (error) {
+      console.error('[ProjectDetail] Erreur inattendue lors du rafraîchissement:', error);
+    } finally {
+      setIsLoadingCandidates(false);
+    }
+  };
+
+  // Fonction pour importer de nouveaux candidats (appelée après l'import réussi)
+  const handleImportCandidates = async () => {
     setShowImportModal(false);
+    // Rafraîchir la liste depuis Supabase pour voir les nouveaux candidats
+    await refreshCandidates();
   };
 
   const getStatusColor = (status: string) => {
@@ -780,6 +884,19 @@ PS : Je suis l'agent AI de Rafael Debucquet, ce première échange ne durera que
                 <h2 className="font-semibold text-lg">Pipeline Kanban</h2>
                 <div className="flex gap-2">
                   <Button 
+                    variant="default" 
+                    size="sm"
+                    onClick={() => {
+                      setIsAgentActive(true);
+                      // Ici vous pourriez appeler une API pour lancer l'agent IA
+                      alert('Agent IA lancé ! Il va commencer à contacter les candidats.');
+                    }}
+                    className="gap-2"
+                  >
+                    <Play className="h-4 w-4" />
+                    Lancer l'agent IA
+                  </Button>
+                  <Button 
                     variant="outline" 
                     size="sm"
                     onClick={() => setShowImportModal(true)}
@@ -799,18 +916,23 @@ PS : Je suis l'agent AI de Rafael Debucquet, ce première échange ne durera que
                   </Button>
                 </div>
               </div>
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                {["imported", "contacted", "responded", "joined"].map(
-                  (status) => (
-                    <div key={status} className="bg-muted rounded-lg p-4">
-                      <h3 className="font-semibold text-sm mb-4">
-                        {getStatusLabel(status)}
-                        {status === "joined" && " (voir dans qualifiés)"}
-                      </h3>
-                      <div className="space-y-3">
-                        {candidatesList
-                          .filter((c) => c.status === status)
-                          .map((candidate) => (
+              {isLoadingCandidates ? (
+                <div className="text-center py-8">
+                  <p className="text-muted-foreground">Chargement des candidats...</p>
+                </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                  {["imported", "contacted", "responded", "joined"].map(
+                    (status) => (
+                      <div key={status} className="bg-muted rounded-lg p-4">
+                        <h3 className="font-semibold text-sm mb-4">
+                          {getStatusLabel(status)}
+                          {status === "joined" && " (voir dans qualifiés)"}
+                        </h3>
+                        <div className="space-y-3">
+                          {candidatesList
+                            .filter((c) => c.status === status)
+                            .map((candidate) => (
                             <Card
                               key={candidate.id}
                               className="p-3 cursor-pointer hover:shadow-md transition-shadow"
@@ -848,7 +970,8 @@ PS : Je suis l'agent AI de Rafael Debucquet, ce première échange ne durera que
                     </div>
                   )
                 )}
-              </div>
+                </div>
+              )}
             </div>
           </TabsContent>
 
@@ -1010,6 +1133,7 @@ PS : Je suis l'agent AI de Rafael Debucquet, ce première échange ne durera que
       {/* Modal d'import de nouveaux contacts */}
       {showImportModal && (
         <ImportCandidatesModal
+          projectId={project.id}
           onClose={() => setShowImportModal(false)}
           onImport={handleImportCandidates}
         />
@@ -1020,87 +1144,122 @@ PS : Je suis l'agent AI de Rafael Debucquet, ce première échange ne durera que
 
 // Composant modal pour importer de nouveaux candidats
 function ImportCandidatesModal({
+  projectId,
   onClose,
   onImport,
 }: {
+  projectId: string;
   onClose: () => void;
-  onImport: (candidates: Candidate[]) => void;
+  onImport: () => void;
 }) {
   const [step, setStep] = useState<'upload' | 'mapping'>('upload');
   const [file, setFile] = useState<File | null>(null);
   const [csvHeaders, setCsvHeaders] = useState<string[]>([]);
   const [csvData, setCsvData] = useState<any[]>([]);
+  const [isImporting, setIsImporting] = useState(false);
   const [mapping, setMapping] = useState<{
     nom: string;
     prenom: string;
     linkedin: string;
+    email?: string;
+    telephone?: string;
   }>({
     nom: '',
     prenom: '',
-    linkedin: ''
+    linkedin: '',
+    email: '',
+    telephone: '',
   });
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const selectedFile = e.target.files?.[0];
     if (selectedFile && selectedFile.name.endsWith('.csv')) {
       setFile(selectedFile);
       
-      const text = await selectedFile.text();
-      const lines = text.split('\n').filter(line => line.trim());
-      if (lines.length > 0) {
-        const headers = lines[0].split(',').map(h => h.trim().replace(/"/g, ''));
-        setCsvHeaders(headers);
-        
-        const data = lines.slice(1).map(line => {
-          const values = line.split(',').map(v => v.trim().replace(/"/g, ''));
-          const row: any = {};
-          headers.forEach((header, index) => {
-            row[header] = values[index] || '';
-          });
-          return row;
-        });
-        setCsvData(data);
-        
-        // Auto-mapping intelligent
-        const autoMapping: any = {};
-        headers.forEach(header => {
-          const lowerHeader = header.toLowerCase();
-          if (lowerHeader.includes('nom') && !lowerHeader.includes('prenom')) {
-            autoMapping.nom = header;
-          } else if (lowerHeader.includes('prenom') || lowerHeader.includes('prénom')) {
-            autoMapping.prenom = header;
-          } else if (lowerHeader.includes('linkedin') || lowerHeader.includes('linked')) {
-            autoMapping.linkedin = header;
+      // Utiliser PapaParse pour parser le CSV (comme dans processCSV)
+      Papa.parse(selectedFile, {
+        header: true,
+        skipEmptyLines: true,
+        complete: (results: any) => {
+          if (results.data && results.data.length > 0) {
+            const headers = results.meta.fields || [];
+            setCsvHeaders(headers);
+            setCsvData(results.data);
+            
+            // Auto-mapping intelligent
+            const autoMapping: any = {
+              nom: '',
+              prenom: '',
+              linkedin: '',
+              email: '',
+              telephone: '',
+            };
+            
+            headers.forEach((header: string) => {
+              const lowerHeader = header.toLowerCase();
+              if (lowerHeader.includes('nom') && !lowerHeader.includes('prenom') && !lowerHeader.includes('prénom') && !lowerHeader.includes('complet')) {
+                autoMapping.nom = header;
+              } else if (lowerHeader.includes('prenom') || lowerHeader.includes('prénom')) {
+                autoMapping.prenom = header;
+              } else if (lowerHeader.includes('linkedin') || lowerHeader.includes('linked')) {
+                autoMapping.linkedin = header;
+              } else if (lowerHeader.includes('email') || lowerHeader.includes('e-mail')) {
+                autoMapping.email = header;
+              } else if (lowerHeader.includes('telephone') || lowerHeader.includes('téléphone') || lowerHeader.includes('phone') || lowerHeader.includes('tel')) {
+                autoMapping.telephone = header;
+              }
+            });
+            
+            setMapping(autoMapping);
+            setStep('mapping');
+          } else {
+            alert('Le fichier CSV est vide ou ne contient pas de données valides');
           }
-        });
-        setMapping(autoMapping);
-        
-        setStep('mapping');
-      }
+        },
+        error: (error: any) => {
+          console.error('Erreur lors du parsing CSV:', error);
+          alert(`Erreur lors de la lecture du fichier CSV: ${error.message}`);
+        }
+      });
     } else {
       alert('Veuillez sélectionner un fichier CSV');
     }
   };
 
-  const handleImport = () => {
+  const handleImport = async () => {
     if (!mapping.nom || !mapping.prenom || !mapping.linkedin) {
-      alert('Veuillez mapper les trois colonnes : Nom, Prénom et LinkedIn');
+      alert('Veuillez mapper les trois colonnes obligatoires : Nom, Prénom et LinkedIn');
       return;
     }
 
-    const newCandidates: Candidate[] = csvData.map((row, index) => ({
-      id: `imported_${Date.now()}_${index}`,
-      name: `${row[mapping.prenom] || ''} ${row[mapping.nom] || ''}`.trim(),
-      email: row.email || '',
-      phone: row.phone || row.telephone || '',
-      company: row.company || row.entreprise || '',
-      status: 'imported' as const,
-      dateAdded: new Date().toISOString().split('T')[0],
-      sequenceStage: 'En attente',
-    }));
+    if (!file) {
+      alert('Veuillez sélectionner un fichier CSV');
+      return;
+    }
 
-    onImport(newCandidates);
+    try {
+      setIsImporting(true);
+      console.log('[ProjectDetail] Import des candidats pour le projet:', projectId);
+      console.log('[ProjectDetail] Mapping:', mapping);
+
+      // Utiliser processCSV pour insérer dans Supabase
+      const result = await processCSV(file, projectId, mapping);
+      
+      const successCount = (result as any).summary?.success || 0;
+      console.log(`[ProjectDetail] ✅ ${successCount} candidat(s) importé(s) avec succès`);
+
+      // Afficher un message de succès
+      alert(`✅ ${successCount} candidat(s) importé(s) avec succès !\n\nLes nouveaux contacts apparaîtront dans la colonne "Importé".`);
+
+      // Fermer le modal et rafraîchir la liste
+      onImport();
+    } catch (error: any) {
+      console.error('[ProjectDetail] Erreur lors de l\'import:', error);
+      alert(`Erreur lors de l'importation: ${error.message || 'Erreur inconnue'}`);
+    } finally {
+      setIsImporting(false);
+    }
   };
 
   return (
@@ -1141,7 +1300,7 @@ function ImportCandidatesModal({
           {step === 'mapping' && (
             <div className="space-y-4">
               <p className="text-sm text-muted-foreground mb-4">
-                Sélectionnez les colonnes correspondant à : Nom, Prénom et LinkedIn
+                Sélectionnez les colonnes correspondant aux champs suivants (les champs marqués * sont obligatoires)
               </p>
               
               <div className="space-y-4">
@@ -1186,14 +1345,51 @@ function ImportCandidatesModal({
                     ))}
                   </select>
                 </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Email (optionnel)</label>
+                  <select
+                    value={mapping.email || ''}
+                    onChange={(e) => setMapping({ ...mapping, email: e.target.value })}
+                    className="w-full h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                  >
+                    <option value="">Sélectionnez une colonne (optionnel)</option>
+                    {csvHeaders.map(header => (
+                      <option key={header} value={header}>{header}</option>
+                    ))}
+                  </select>
+                </div>
+
+                <div>
+                  <label className="text-sm font-medium mb-2 block">Téléphone (optionnel)</label>
+                  <select
+                    value={mapping.telephone || ''}
+                    onChange={(e) => setMapping({ ...mapping, telephone: e.target.value })}
+                    className="w-full h-9 rounded-md border border-input bg-transparent px-3 py-1 text-sm"
+                  >
+                    <option value="">Sélectionnez une colonne (optionnel)</option>
+                    {csvHeaders.map(header => (
+                      <option key={header} value={header}>{header}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
 
               <div className="flex gap-3 mt-6">
-                <Button variant="outline" onClick={() => setStep('upload')} className="flex-1">
+                <Button 
+                  variant="outline" 
+                  onClick={() => setStep('upload')} 
+                  className="flex-1"
+                  disabled={isImporting}
+                >
                   Retour
                 </Button>
-                <Button onClick={handleImport} className="flex-1">
-                  Importer {csvData.length} contact{csvData.length > 1 ? 's' : ''}
+                <Button 
+                  onClick={handleImport} 
+                  className="flex-1"
+                  disabled={isImporting}
+                >
+                  {isImporting ? 'Import en cours...' : `Importer ${csvData.length} contact${csvData.length > 1 ? 's' : ''}`}
                 </Button>
               </div>
             </div>
